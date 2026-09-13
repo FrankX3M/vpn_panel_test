@@ -1,0 +1,14 @@
+{
+  "tasks": [
+    {"id": "01_db_models",       "depends_on": [],                                       "contracts": ["01_db_models"]},
+    {"id": "02_key_generation",  "depends_on": [],                                       "contracts": ["02_key_generation"]},
+    {"id": "03_render_singbox",  "depends_on": ["01_db_models"],                          "contracts": ["01_db_models", "03_render_singbox"]},
+    {"id": "04_render_caddy",    "depends_on": ["01_db_models"],                          "contracts": ["01_db_models", "04_render_caddy"]},
+    {"id": "05_service_control", "depends_on": [],                                       "contracts": ["05_service_control"]},
+    {"id": "06_api_users_crud",  "depends_on": ["01_db_models", "02_key_generation"],     "contracts": ["01_db_models", "02_key_generation", "06_api_users_crud"]},
+    {"id": "07_apply_pipeline",  "depends_on": ["03_render_singbox", "04_render_caddy", "05_service_control"], "contracts": ["07_apply_pipeline"]},
+    {"id": "08_client_links",    "depends_on": ["01_db_models"],                          "contracts": ["08_client_links"]},
+    {"id": "09_web_admin",       "depends_on": ["06_api_users_crud", "08_client_links"],  "contracts": ["09_web_admin"]},
+    {"id": "integration_01_e2e", "depends_on": ["01_db_models", "02_key_generation", "03_render_singbox", "04_render_caddy", "05_service_control", "06_api_users_crud", "07_apply_pipeline", "08_client_links"], "contracts": []}
+  ]
+}

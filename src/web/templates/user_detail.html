@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+
+{% block title %}{{ user.label }} — VPN Panel{% endblock %}
+
+{% block content %}
+<div class="detail-head">
+  <h1>{{ user.label }}</h1>
+  <span class="badge {{ 'badge-active' if user.is_active else 'badge-inactive' }}">
+    {{ "активен" if user.is_active else "выключен" }}
+  </span>
+</div>
+
+<div class="actions detail-actions">
+  <form method="post" action="/users/{{ user.id }}/toggle">
+    <button class="btn" type="submit">{{ "Выключить" if user.is_active else "Включить" }}</button>
+  </form>
+  <form method="post" action="/users/{{ user.id }}/delete"
+        onsubmit="return confirm('Удалить пользователя {{ user.label }}?');">
+    <button class="btn btn-danger" type="submit">Удалить</button>
+  </form>
+</div>
+
+{% if links %}
+  <div class="link-list">
+    {% for item in links %}
+      <section class="card link-card">
+        <h2>{{ item.name }}</h2>
+        <div class="qr">{{ item.qr | safe }}</div>
+        <div class="link-row">
+          <code class="link-text">{{ item.link }}</code>
+          <button class="btn" type="button" data-copy="{{ item.link }}">Копировать</button>
+        </div>
+      </section>
+    {% endfor %}
+  </div>
+{% else %}
+  <p class="empty">Нет доступных ссылок. Возможно, сервер ещё не настроен.</p>
+{% endif %}
+
+<p><a href="/">← Назад к списку</a></p>
+{% endblock %}

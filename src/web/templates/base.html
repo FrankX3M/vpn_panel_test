@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}VPN Panel{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">VPN Panel</a>
+    <nav class="nav">
+      <a href="/">Пользователи</a>
+      <a href="/users/new">Добавить</a>
+    </nav>
+  </header>
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+  <script>
+    document.addEventListener("click", function (event) {
+      var target = event.target.closest("[data-copy]");
+      if (!target) return;
+      var text = target.getAttribute("data-copy");
+      navigator.clipboard.writeText(text).catch(function () {
+        window.prompt("Скопируйте ссылку:", text);
+      });
+    });
+  </script>
+</body>
+</html>

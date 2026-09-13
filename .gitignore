@@ -1,0 +1,18 @@
+nore · TXT
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+*.db
+*.db-journal
+.env
+ 
+# редакторы
+.vscode/
+.idea/
+ 
+# secrets — если когда-нибудь заведёшь .env с реальными ключами/паролями
+.env.local

@@ -1,0 +1,19 @@
+[Unit]
+Description=VPN Panel (FastAPI admin for VLESS+Reality / Hysteria2 / NaiveProxy)
+After=network.target
+
+[Service]
+Type=simple
+User=vpn-panel
+Group=vpn-panel
+WorkingDirectory=/opt/vpn-panel
+Environment="PATH=/opt/vpn-panel/.venv/bin"
+ExecStart=/opt/vpn-panel/.venv/bin/uvicorn src.main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=3
+
+# Панель слушает только localhost — наружу её отдаёт Caddy (reverse_proxy + basicauth),
+# см. contracts/04_render_caddy.md и architecture.md, раздел 4.
+
+[Install]
+WantedBy=multi-user.target

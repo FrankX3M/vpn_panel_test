@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+
+{% block title %}Добавить пользователя — VPN Panel{% endblock %}
+
+{% block content %}
+<h1>Добавить пользователя</h1>
+
+<div class="card form-card">
+  <form method="post" action="/users/new">
+    <label class="field">
+      <span>Имя (label)</span>
+      <input type="text" name="label" required maxlength="64" autofocus
+             placeholder="Например, Вася">
+    </label>
+    <div class="actions">
+      <button class="btn btn-primary" type="submit">Создать</button>
+      <a class="btn" href="/">Отмена</a>
+    </div>
+  </form>
+</div>
+{% endblock %}
