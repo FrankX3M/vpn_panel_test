@@ -1,4 +1,4 @@
-"""FastAPI-роутер users/setup CRUD (контракт `contracts/06_api_users_crud.md`).
+"""FastAPI-роутер users/setup CRUD (CRUD пользователей и первичная настройка сервера).
 
 Вызов применения конфигов (`core.apply.apply`) подключается через инъекцию
 зависимости `get_apply`. Импорт `core.apply` выполняется лениво внутри `get_apply`,

@@ -1,0 +1,80 @@
+From cc1eeca564df71fdc71cfab8464d237b6c58b392 Mon Sep 17 00:00:00 2001
+From: FrankX3M <you@example.com>
+Date: Sun, 13 Sep 2026 16:55:50 +0000
+Subject: [PATCH] fix: Caddy HTTP/3 (QUIC) binds UDP:443, conflicts with
+ Hysteria2 in sing-box
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Caddy enables HTTP/3 by default for any HTTPS site, which listens on UDP:443
+for QUIC. architecture.md deliberately puts Hysteria2 on UDP:443 in sing-box
+(see 'Почему порты именно такие'), assuming Caddy only needs TCP:443 —
+that assumption was wrong. Both processes fighting over the same UDP port
+caused caddy to fail on every single start:
+
+  Error: loading initial config: loading new config: http app module: start:
+  starting HTTP/3 QUIC listener: listen udp :443: bind: address already in use
+
+Fixed by adding a global 'servers { protocols h1 h2 }' block to the rendered
+Caddyfile, restricting Caddy to HTTP/1.1 and HTTP/2 (TCP only). Neither the
+forward-proxy (naive) nor the reverse-proxy (admin panel) site needs HTTP/3.
+
+Added a regression test asserting the generated Caddyfile disables h3.
+All checks green: ruff, mypy, pytest (86 passed).
+---
+ src/core/render/caddy.py        | 10 +++++++++-
+ tests/core/render/test_caddy.py |  9 +++++++++
+ 2 files changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/src/core/render/caddy.py b/src/core/render/caddy.py
+index df32afe..3eefe69 100644
+--- a/src/core/render/caddy.py
++++ b/src/core/render/caddy.py
+@@ -14,7 +14,8 @@ def render_caddyfile(users: list[User], server: ServerConfig) -> str:
+     """Вернуть содержимое Caddyfile целиком (naive-прокси и админка).
+ 
+     Рендер состоит из глобального блока опций (директива ``order`` для модуля
+-    ``forwardproxy``), site-блока naive-прокси на ``server.domain`` и
++    ``forwardproxy`` и ``servers { protocols h1 h2 }``, отключающая HTTP/3 —
++    см. ниже), site-блока naive-прокси на ``server.domain`` и
+     site-блока админки на ``server.admin_domain``.
+ 
+     Учитываются только пользователи с ``is_active=True`` и непустым
+@@ -48,6 +49,13 @@ def render_caddyfile(users: list[User], server: ServerConfig) -> str:
+         "{",
+         "\t# Caddy собран через xcaddy с модулем github.com/caddyserver/forwardproxy",
+         "\torder forward_proxy before reverse_proxy",
++        "\t# HTTP/3 (QUIC) по умолчанию слушает UDP:443 — тот же порт, что и Hysteria2",
++        "\t# в sing-box (см. architecture.md, раздел 4). Отключаем h3 глобально: forward-proxy",
++        "\t# и reverse-proxy на админку не нуждаются в QUIC, а конфликт порта иначе валит caddy",
++        "\t# при каждом старте ('bind: address already in use').",
++        "\tservers {",
++        "\t\tprotocols h1 h2",
++        "\t}",
+         "}",
+         "",
+         f"{server.domain} {{",
+diff --git a/tests/core/render/test_caddy.py b/tests/core/render/test_caddy.py
+index e5c6250..4511698 100644
+--- a/tests/core/render/test_caddy.py
++++ b/tests/core/render/test_caddy.py
+@@ -103,6 +103,15 @@ def test_empty_naive_accounts_keeps_valid_syntax() -> None:
+     assert "basic_auth" not in forward_proxy_block
+ 
+ 
++def test_disables_http3_to_avoid_hysteria2_udp_conflict() -> None:
++    """Глобальный блок отключает HTTP/3 (protocols h1 h2) — иначе Caddy пытается
++    слушать UDP:443 для QUIC и конфликтует с Hysteria2 в sing-box на том же порту
++    ('bind: address already in use' при каждом старте caddy на реальном сервере)."""
++    result = render_caddyfile([], _server())
++    assert "protocols h1 h2" in result
++    assert "servers {" in result
++
++
+ def test_balanced_braces() -> None:
+     """Количество открывающих и закрывающих фигурных скобок совпадает."""
+     result = render_caddyfile(
+-- 
+2.43.0
+

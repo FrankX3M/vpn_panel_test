@@ -1,0 +1,287 @@
+From 9e66aa7bb6fc573ef595bdf1b89701e3d7f0574f Mon Sep 17 00:00:00 2001
+From: FrankX3M <you@example.com>
+Date: Sun, 13 Sep 2026 16:28:17 +0000
+Subject: [PATCH] fix: call init_db() on app startup; fix xcaddy/Go install;
+ add caddy systemd unit
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+src/main.py: switch to FastAPI lifespan, call core.db.session.init_db() on
+startup. Root cause of the deploy-time crash:
+
+  sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) no such table: server_config
+
+init_db() existed and worked correctly (Base.metadata.create_all), but was
+never called anywhere outside of test fixtures that build their own in-memory
+engine. The module-level comment claiming this was intentional (deferred to
+an undefined 'deployment step') was incorrect — there is no such step in the
+pipeline, and the panel crashed on every first request against a fresh DB.
+
+deploy/install.sh:
+  - install a Go toolchain before  (xcaddy compiles Caddy from
+    source and needs Go on PATH; previously failed with
+    'exec: "go": executable file not found in $PATH')
+  - install xcaddy via the Cloudsmith apt repo instead of the old
+    raw.githubusercontent.com/.../xcaddy/master/install.sh, which now 404s
+  - make the sing-box / xcaddy / caddy steps idempotent (skip if already
+    installed) so the script is safe to re-run
+
+deploy/systemd/caddy.service (new):
+  building Caddy via  (required for the forwardproxy/naive
+  module) does not ship a systemd unit or a 'caddy' system user the way the
+  official apt package does — both are created explicitly now.
+
+tests/test_app_startup.py (new):
+  regression test for the init_db() bug. Spawns the app in a subprocess with
+  cwd = repo root (mirrors the systemd WorkingDirectory in production) and
+  asserts all five tables exist after the lifespan startup/shutdown cycle.
+  Existing API tests didn't catch this because their TestClient fixture
+  builds tables directly against an in-memory engine, bypassing the app's
+  own startup path entirely.
+
+All checks green: ruff, mypy --ignore-missing-imports, pytest (85 passed).
+---
+ deploy/install.sh            | 49 ++++++++++++++++++-----
+ deploy/systemd/caddy.service | 21 ++++++++++
+ src/main.py                  | 24 +++++++----
+ tests/test_app_startup.py    | 77 ++++++++++++++++++++++++++++++++++++
+ 4 files changed, 155 insertions(+), 16 deletions(-)
+ create mode 100644 deploy/systemd/caddy.service
+ create mode 100644 tests/test_app_startup.py
+
+diff --git a/deploy/install.sh b/deploy/install.sh
+index a7f541c..d095c1e 100644
+--- a/deploy/install.sh
++++ b/deploy/install.sh
+@@ -14,21 +14,52 @@ fi
+ echo "== 2. sing-box (официальный репозиторий) =="
+ # Проверить актуальную инструкцию на https://sing-box.sagernet.org/installation/ перед запуском —
+ # способ установки (apt-репозиторий vs standalone-бинарник) может измениться.
+-curl -fsSL https://sing-box.app/install.sh | sh
++if ! command -v sing-box >/dev/null 2>&1; then
++    curl -fsSL https://sing-box.app/install.sh | sh
++fi
++
++echo "== 3. Go-тулчейн (нужен xcaddy для сборки Caddy из исходников) =="
++if ! command -v go >/dev/null 2>&1; then
++    apt-get install -y golang-go
++    # Debian/Ubuntu стабильный репозиторий иногда отстаёт от версии, которую требует свежий
++    # Caddy/forwardproxy (нужен Go 1.21+). Проверить командой ниже; если версия слишком старая —
++    # поставить вручную с https://go.dev/dl/ (tar.gz в /usr/local/go, PATH=$PATH:/usr/local/go/bin).
++    go version
++fi
+ 
+-echo "== 3. Caddy + модуль forwardproxy (через xcaddy) =="
++echo "== 4. Caddy + модуль forwardproxy (через xcaddy) =="
++# xcaddy ставится через apt-репозиторий Cloudsmith (официальный способ на момент написания —
++# сверить актуальность на https://github.com/caddyserver/xcaddy перед запуском, если снова упадёт).
+ if ! command -v xcaddy >/dev/null 2>&1; then
+-    curl -fsSL https://raw.githubusercontent.com/caddyserver/xcaddy/master/install.sh | sh
++    apt-get install -y debian-keyring debian-archive-keyring apt-transport-https
++    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/xcaddy/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-xcaddy-archive-keyring.gpg
++    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/xcaddy/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-xcaddy.list
++    apt-get update
++    apt-get install -y xcaddy
++fi
++if [ ! -x /usr/bin/caddy ]; then
++    xcaddy build --with github.com/caddyserver/forwardproxy@caddy2=github.com/klzgrad/forwardproxy@naive
++    mv ./caddy /usr/bin/caddy
++    chmod +x /usr/bin/caddy
+ fi
+-xcaddy build --with github.com/caddyserver/forwardproxy@caddy2=github.com/klzgrad/forwardproxy@naive
+-mv ./caddy /usr/bin/caddy
+-chmod +x /usr/bin/caddy
+ 
+-echo "== 4. Директории конфигов =="
++echo "== 5. Директории конфигов =="
+ mkdir -p /etc/sing-box /etc/caddy
+ chown vpn-panel:vpn-panel /etc/sing-box /etc/caddy
++chmod 755 /etc/sing-box /etc/caddy
++# Права 755 + владелец vpn-panel: панель может писать конфиги (см. core/apply.py), а сервисы
++# sing-box/caddy читают их от своих системных пользователей за счёт world-readable файлов
++# (стандартный umask при os.replace даёт 644) — это проще, чем городить общие группы.
++
++echo "== 5b. Системный пользователь caddy + systemd-юнит =="
++# Официальный apt-пакет Caddy сам создаёт юзера caddy и systemd-юнит — при установке через
++# xcaddy build (наш случай, нужен ради модуля forwardproxy) этого не происходит, делаем руками.
++if ! id -u caddy >/dev/null 2>&1; then
++    useradd --system --home-dir /var/lib/caddy --create-home --shell /usr/sbin/nologin caddy
++fi
++cp "$(dirname "$0")/systemd/caddy.service" /etc/systemd/system/caddy.service
+ 
+-echo "== 5. Ограниченные sudo-права для vpn-panel =="
++echo "== 6. Ограниченные sudo-права для vpn-panel =="
+ cat > /etc/sudoers.d/vpn-panel <<'EOF'
+ vpn-panel ALL=(root) NOPASSWD: /usr/bin/systemctl restart sing-box, /usr/bin/systemctl reload sing-box, /usr/bin/systemctl status sing-box
+ vpn-panel ALL=(root) NOPASSWD: /usr/bin/systemctl restart caddy, /usr/bin/systemctl reload caddy, /usr/bin/systemctl status caddy
+@@ -36,7 +67,7 @@ EOF
+ chmod 440 /etc/sudoers.d/vpn-panel
+ visudo -c
+ 
+-echo "== 6. systemd-юнит панели =="
++echo "== 7. systemd-юнит панели =="
+ cp "$(dirname "$0")/systemd/vpn-panel.service" /etc/systemd/system/vpn-panel.service
+ systemctl daemon-reload
+ 
+diff --git a/deploy/systemd/caddy.service b/deploy/systemd/caddy.service
+new file mode 100644
+index 0000000..b4f35ae
+--- /dev/null
++++ b/deploy/systemd/caddy.service
+@@ -0,0 +1,21 @@
++[Unit]
++Description=Caddy (VPN Panel: NaiveProxy + reverse proxy to admin panel)
++Documentation=https://caddyserver.com/docs/
++After=network.target network-online.target
++Requires=network-online.target
++
++[Service]
++Type=notify
++User=caddy
++Group=caddy
++ExecStart=/usr/bin/caddy run --environ --config /etc/caddy/Caddyfile
++ExecReload=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force
++TimeoutStopSec=5s
++LimitNOFILE=1048576
++LimitNPROC=512
++PrivateTmp=true
++ProtectSystem=full
++AmbientCapabilities=CAP_NET_BIND_SERVICE
++
++[Install]
++WantedBy=multi-user.target
+diff --git a/src/main.py b/src/main.py
+index 73400b1..cfd7941 100644
+--- a/src/main.py
++++ b/src/main.py
+@@ -1,14 +1,29 @@
+ """Точка входа FastAPI (собирает роуты приложения)."""
+ 
++from collections.abc import AsyncIterator
++from contextlib import asynccontextmanager
++
+ from fastapi import FastAPI, Request
+ from fastapi.responses import JSONResponse
+ from fastapi.staticfiles import StaticFiles
+ 
+ from src.api.users import router as users_router
+ from src.core.apply import ApplyError
++from src.core.db.session import init_db
+ from src.web.routes import router as web_router
+ 
+-app = FastAPI(title="VPN Panel")
++
++@asynccontextmanager
++async def lifespan(app: FastAPI) -> AsyncIterator[None]:
++    # Создаёт таблицы в БД при старте приложения, если их ещё нет (идемпотентно —
++    # Base.metadata.create_all не трогает уже существующие таблицы). Без этого вызова
++    # любой первый запрос к чистой БД падает с sqlalchemy.exc.OperationalError:
++    # no such table — что и происходило на реальном деплое.
++    init_db()
++    yield
++
++
++app = FastAPI(title="VPN Panel", lifespan=lifespan)
+ app.include_router(users_router)
+ app.include_router(web_router)
+ app.mount("/static", StaticFiles(directory="src/web/static"), name="static")
+@@ -17,9 +32,4 @@ app.mount("/static", StaticFiles(directory="src/web/static"), name="static")
+ @app.exception_handler(ApplyError)
+ async def apply_error_handler(request: Request, exc: ApplyError) -> JSONResponse:
+     """Вернуть 500 с текстом ошибки применения (stderr systemctl) админу."""
+-    return JSONResponse(status_code=500, content={"detail": str(exc)})
+-
+-
+-# `init_db()` намеренно НЕ вызывается здесь: приложение должно уметь стартовать
+-# и тестироваться без создания боевой `vpn_panel.db`. Инициализация схемы БД —
+-# зона боевого запуска (отдельный шаг развёртывания / ТЗ 09).
+\ No newline at end of file
++    return JSONResponse(status_code=500, content={"detail": str(exc)})
+\ No newline at end of file
+diff --git a/tests/test_app_startup.py b/tests/test_app_startup.py
+new file mode 100644
+index 0000000..55ff744
+--- /dev/null
++++ b/tests/test_app_startup.py
+@@ -0,0 +1,77 @@
++"""
++Регрессионный тест: приложение должно создавать все таблицы БД при реальном старте
++(через lifespan FastAPI, запущенный в отдельном процессе с чистым рабочим каталогом),
++а не только когда init_db() вызван вручную в фикстуре теста.
++
++Баг, который это ловит: src/main.py не вызывал core.db.session.init_db() при старте
++(engine в session.py указывает на sqlite:///./vpn_panel.db — путь относительно cwd,
++поэтому тест запускает приложение в отдельном subprocess с cwd=tmp_path, чтобы не
++трогать ни боевую БД, ни файлы других тестов, и не зависеть от кэша sys.modules
++внутри одного процесса pytest).
++"""
++
++import os
++import subprocess
++import sys
++import textwrap
++from pathlib import Path
++
++REPO_ROOT = Path(__file__).resolve().parents[1]
++
++_CHILD_SCRIPT = textwrap.dedent(
++    """
++    from fastapi.testclient import TestClient
++    from sqlalchemy import create_engine, inspect
++
++    from src.main import app
++
++    with TestClient(app):
++        pass  # вход/выход из контекста прогоняет lifespan (startup/shutdown)
++
++    engine = create_engine("sqlite:///./vpn_panel.db")
++    tables = set(inspect(engine).get_table_names())
++    expected = {"users", "vless_accounts", "hysteria2_accounts", "naive_accounts", "server_config"}
++    missing = expected - tables
++    if missing:
++        raise SystemExit(f"MISSING_TABLES:{missing}")
++    print("OK")
++    """
++)
++
++
++def test_app_startup_creates_all_tables(tmp_path):
++    """Реальный старт приложения (как в проде — cwd = корень репо, см. systemd
++    WorkingDirectory) → все таблицы созданы. Побочный vpn_panel.db, который
++    создаст init_db() в REPO_ROOT, временно отводится в сторону и убирается
++    после теста, чтобы не задеть боевой файл, если он есть локально."""
++    script_path = tmp_path / "_check_startup.py"
++    script_path.write_text(_CHILD_SCRIPT, encoding="utf-8")
++
++    db_path = REPO_ROOT / "vpn_panel.db"
++    backup_path = tmp_path / "vpn_panel.db.bak"
++    had_existing_db = db_path.exists()
++    if had_existing_db:
++        db_path.rename(backup_path)
++
++    try:
++        child_env = dict(os.environ)
++        child_env["PYTHONPATH"] = str(REPO_ROOT)
++        result = subprocess.run(
++            [sys.executable, str(script_path)],
++            cwd=REPO_ROOT,
++            env=child_env,
++            capture_output=True,
++            text=True,
++            timeout=30,
++        )
++    finally:
++        db_path.unlink(missing_ok=True)
++        if had_existing_db:
++            backup_path.rename(db_path)
++
++    assert result.returncode == 0, (
++        f"Приложение не создало все таблицы при старте.\n"
++        f"stdout: {result.stdout}\nstderr: {result.stderr}\n"
++        f"Проверь, что src/main.py вызывает core.db.session.init_db() в lifespan."
++    )
++    assert "OK" in result.stdout
+-- 
+2.43.0
+

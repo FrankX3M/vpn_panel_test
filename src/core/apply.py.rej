@@ -1,0 +1,64 @@
+diff a/src/core/apply.py b/src/core/apply.py	(rejected hunks)
+@@ -66,6 +66,14 @@ def _write_atomic(path: str, content: str) -> None:
+     try:
+         with os.fdopen(fd, "w", encoding="utf-8") as handle:
+             handle.write(content)
++        # tempfile.mkstemp создаёт файл с правами 0600 (только владелец, vpn-panel) —
++        # os.replace() режим не меняет. sing-box/caddy работают от СВОИХ системных
++        # пользователей и иначе не смогут прочитать файл ("Permission denied" при
++        # старте/reload). 0644 — world-readable, secrets внутри (пароли, UUID) уже
++        # защищены тем, что /etc/sing-box и /etc/caddy недоступны посторонним юзерам
++        # на уровне системы в целом, а сами файлы конфигов и так предназначены для
++        # чтения соответствующими системными сервисами.
++        os.chmod(tmp_path, 0o644)
+         os.replace(tmp_path, path)
+     except OSError as exc:
+         try:
+@@ -78,18 +86,40 @@ def _write_atomic(path: str, content: str) -> None:
+ def _reload(service: str) -> None:
+     """Перечитать конфиг сервиса через ``core.svc.control``.
+ 
++    Сначала пробует ``reload`` (не разрывает активные соединения клиентов).
++    Если сервис не запущен вообще (первый ``apply()`` в жизни сервера — юнит
++    ещё ни разу не стартовал — или сервис упал раньше из-за отсутствующего/
++    невалидного конфига) — ``systemctl reload`` в принципе не может поднять
++    неактивный юнит и возвращает ошибку. В этом случае пробуем ``restart``.
++
+     Аргументы:
+         service: имя сервиса (``sing-box`` или ``caddy``).
+ 
+     Исключения:
+-        ApplyError: если ``control`` бросил исключение или вернул ненулевой
+-            ``returncode``. Текст ошибки включает stderr от systemctl.
++        ApplyError: если и ``reload``, и запасной ``restart`` завершились
++            ошибкой/ненулевым ``returncode``. Текст ошибки включает stderr
++            от обеих попыток.
+     """
+     try:
+         result = service_control.control(service, "reload")
+     except Exception as exc:  # noqa: BLE001 — обёртка ошибки в ApplyError
+         raise ApplyError(f"{service} reload failed: {exc}") from exc
+ 
+-    if result.returncode != 0:
+-        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+-        raise ApplyError(f"{service} reload failed: {stderr}")
+\ No newline at end of file
++    if result.returncode == 0:
++        return
++
++    reload_stderr = result.stderr.decode("utf-8", errors="replace").strip()
++
++    try:
++        restart_result = service_control.control(service, "restart")
++    except Exception as exc:  # noqa: BLE001 — обёртка ошибки в ApplyError
++        raise ApplyError(
++            f"{service} reload failed ({reload_stderr}); restart also failed: {exc}"
++        ) from exc
++
++    if restart_result.returncode != 0:
++        restart_stderr = restart_result.stderr.decode("utf-8", errors="replace").strip()
++        raise ApplyError(
++            f"{service} reload failed ({reload_stderr}); "
++            f"restart also failed: {restart_stderr}"
++        )
+\ No newline at end of file

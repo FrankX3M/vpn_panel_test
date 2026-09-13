@@ -1,4 +1,4 @@
-"""Pydantic-схемы для API (контракт `contracts/06_api_users_crud.md`)."""
+"""Pydantic-схемы для API (схемы запросов/ответов API пользователей)."""
 
 from datetime import datetime
 

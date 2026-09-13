@@ -1,0 +1,57 @@
+From 42a35b28964b775edab9d4683685ac1533b2ed8f Mon Sep 17 00:00:00 2001
+From: FrankX3M <you@example.com>
+Date: Sun, 13 Sep 2026 16:47:02 +0000
+Subject: [PATCH] fix: vpn-panel.service PATH excludes /usr/bin, breaks sudo
+ lookup for control()
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Environment="PATH=.../.venv/bin" fully replaced the process PATH instead of
+extending it. core/svc/control.py calls subprocess.run(["sudo", "systemctl",
+...]) without shell=True, so the command is resolved via PATH lookup — with
+only .venv/bin on PATH, 'sudo' (in /usr/bin) isn't found:
+
+  ServiceControlError trace -> FileNotFoundError:
+  [Errno 2] No such file or directory: 'sudo'
+
+Reproduced on POST /api/users -> apply() -> control("sing-box", "reload").
+
+Also documented inline that WorkingDirectory/PATH/ExecStart must all use the
+same real deploy path (a recurring source of status=203/EXEC in this deploy).
+---
+ deploy/systemd/vpn-panel.service | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/deploy/systemd/vpn-panel.service b/deploy/systemd/vpn-panel.service
+index 1c93e21..1caa269 100644
+--- a/deploy/systemd/vpn-panel.service
++++ b/deploy/systemd/vpn-panel.service
+@@ -7,13 +7,23 @@ Type=simple
+ User=vpn-panel
+ Group=vpn-panel
+ WorkingDirectory=/opt/vpn-panel
+-Environment="PATH=/opt/vpn-panel/.venv/bin"
++Environment="PATH=/opt/vpn-panel/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ ExecStart=/opt/vpn-panel/.venv/bin/uvicorn src.main:app --host 127.0.0.1 --port 8000
+ Restart=on-failure
+ RestartSec=3
+ 
+ # Панель слушает только localhost — наружу её отдаёт Caddy (reverse_proxy + basicauth),
+ # см. contracts/04_render_caddy.md и architecture.md, раздел 4.
++#
++# PATH явно включает /usr/bin и /usr/sbin в дополнение к venv: core/svc/control.py
++# (контракт 05_service_control) вызывает subprocess.run(["sudo", "systemctl", ...])
++# без shell=True — команда ищется строго по PATH процесса, и если PATH содержит
++# только venv/bin, sudo (лежит в /usr/bin) не находится:
++# "[Errno 2] No such file or directory: 'sudo'".
++#
++# ВАЖНО: если реальный путь деплоя отличается от /opt/vpn-panel (например,
++# /opt/vpn_panel_test) — замени во ВСЕХ трёх местах (WorkingDirectory, PATH,
++# ExecStart), иначе получишь status=203/EXEC при старте юнита.
+ 
+ [Install]
+ WantedBy=multi-user.target
+-- 
+2.43.0
+
