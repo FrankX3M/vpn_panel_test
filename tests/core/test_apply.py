@@ -164,6 +164,98 @@ def test_apply_leaves_no_tmp_files(db_session_factory, paths, monkeypatch) -> No
     assert leftovers == []
 
 
+def test_apply_writes_world_readable_files(
+    db_session_factory, paths, monkeypatch
+) -> None:
+    """Файлы конфигов доступны на чтение не только владельцу (vpn-panel), но и
+    системным пользователям sing-box/caddy, от которых работают сами сервисы —
+    tempfile.mkstemp создаёт файл с правами 0600, os.replace() их не меняет,
+    что на реальном деплое приводило к 'Permission denied' при старте caddy."""
+    monkeypatch.setattr(
+        "src.core.svc.control.control",
+        lambda service, action: _successful_control(),
+    )
+
+    db = db_session_factory()
+    try:
+        _seed(db)
+        apply(db)
+    finally:
+        db.close()
+
+    singbox_mode = paths["singbox"].stat().st_mode & 0o777
+    caddy_mode = paths["caddy"].stat().st_mode & 0o777
+    assert singbox_mode == 0o644, f"sing-box config mode is {oct(singbox_mode)}, expected 0644"
+    assert caddy_mode == 0o644, f"Caddyfile mode is {oct(caddy_mode)}, expected 0644"
+
+
+def test_apply_falls_back_to_restart_when_reload_fails(
+    db_session_factory, paths, monkeypatch
+) -> None:
+    """Если reload вернул ненулевой код (сервис ещё не запускался/упал ранее —
+    типичный случай первого apply() в жизни сервера, или сервис упал раньше
+    из-за отсутствующего конфига), apply() пробует restart вместо немедленного
+    ApplyError. Реальный кейс: caddy.service is not active, cannot reload."""
+    calls: list[tuple[str, str]] = []
+
+    def fake_control(service: str, action: str) -> subprocess.CompletedProcess:
+        calls.append((service, action))
+        if service == "caddy" and action == "reload":
+            return subprocess.CompletedProcess(
+                args=["sudo", "systemctl", "reload", "caddy"],
+                returncode=1,
+                stdout=b"",
+                stderr=b"caddy.service is not active, cannot reload.",
+            )
+        return _successful_control()
+
+    monkeypatch.setattr("src.core.svc.control.control", fake_control)
+
+    db = db_session_factory()
+    try:
+        _seed(db)
+        apply(db)  # не должно поднять ApplyError — restart должен сработать
+    finally:
+        db.close()
+
+    assert calls == [
+        ("sing-box", "reload"),
+        ("caddy", "reload"),
+        ("caddy", "restart"),
+    ]
+
+
+def test_apply_raises_when_both_reload_and_restart_fail(
+    db_session_factory, paths, monkeypatch
+) -> None:
+    """Если и reload, и запасной restart вернули ошибку — ApplyError с обоими
+    текстами stderr, а не просто первая ошибка (легче диагностировать на сервере)."""
+
+    def fake_control(service: str, action: str) -> subprocess.CompletedProcess:
+        if service == "caddy":
+            return subprocess.CompletedProcess(
+                args=["sudo", "systemctl", action, "caddy"],
+                returncode=1,
+                stdout=b"",
+                stderr=f"{action} failed for real reason".encode(),
+            )
+        return _successful_control()
+
+    monkeypatch.setattr("src.core.svc.control.control", fake_control)
+
+    db = db_session_factory()
+    try:
+        _seed(db)
+        with pytest.raises(ApplyError) as exc_info:
+            apply(db)
+    finally:
+        db.close()
+
+    message = str(exc_info.value)
+    assert "reload failed for real reason" in message
+    assert "restart failed for real reason" in message
+
+
 def test_apply_raises_apply_error_on_nonzero_returncode_and_keeps_files(
     db_session_factory, paths, monkeypatch
 ) -> None:
