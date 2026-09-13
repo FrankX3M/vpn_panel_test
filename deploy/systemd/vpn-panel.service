@@ -6,9 +6,9 @@ After=network.target
 Type=simple
 User=vpn-panel
 Group=vpn-panel
-WorkingDirectory=/opt/vpn-panel
-Environment="PATH=/opt/vpn-panel/.venv/bin"
-ExecStart=/opt/vpn-panel/.venv/bin/uvicorn src.main:app --host 127.0.0.1 --port 8000
+WorkingDirectory=/opt/vpn_panel_test
+Environment="PATH=/opt/vpn_panel_test/.venv/bin"
+ExecStart=/opt/vpn_panel_test/.venv/bin/uvicorn src.main:app --host 127.0.0.1 --port 8000
 Restart=on-failure
 RestartSec=3
 
