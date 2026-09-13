@@ -14,7 +14,8 @@ def render_caddyfile(users: list[User], server: ServerConfig) -> str:
     """Вернуть содержимое Caddyfile целиком (naive-прокси и админка).
 
     Рендер состоит из глобального блока опций (директива ``order`` для модуля
-    ``forwardproxy``), site-блока naive-прокси на ``server.domain`` и
+    ``forwardproxy`` и ``servers { protocols h1 h2 }``, отключающая HTTP/3 —
+    см. ниже), site-блока naive-прокси на ``server.domain`` и
     site-блока админки на ``server.admin_domain``.
 
     Учитываются только пользователи с ``is_active=True`` и непустым
@@ -48,6 +49,13 @@ def render_caddyfile(users: list[User], server: ServerConfig) -> str:
         "{",
         "\t# Caddy собран через xcaddy с модулем github.com/caddyserver/forwardproxy",
         "\torder forward_proxy before reverse_proxy",
+        "\t# HTTP/3 (QUIC) по умолчанию слушает UDP:443 — тот же порт, что и Hysteria2",
+        "\t# в sing-box (см. architecture.md, раздел 4). Отключаем h3 глобально: forward-proxy",
+        "\t# и reverse-proxy на админку не нуждаются в QUIC, а конфликт порта иначе валит caddy",
+        "\t# при каждом старте ('bind: address already in use').",
+        "\tservers {",
+        "\t\tprotocols h1 h2",
+        "\t}",
         "}",
         "",
         f"{server.domain} {{",

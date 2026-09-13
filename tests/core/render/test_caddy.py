@@ -103,6 +103,15 @@ def test_empty_naive_accounts_keeps_valid_syntax() -> None:
     assert "basic_auth" not in forward_proxy_block
 
 
+def test_disables_http3_to_avoid_hysteria2_udp_conflict() -> None:
+    """Глобальный блок отключает HTTP/3 (protocols h1 h2) — иначе Caddy пытается
+    слушать UDP:443 для QUIC и конфликтует с Hysteria2 в sing-box на том же порту
+    ('bind: address already in use' при каждом старте caddy на реальном сервере)."""
+    result = render_caddyfile([], _server())
+    assert "protocols h1 h2" in result
+    assert "servers {" in result
+
+
 def test_balanced_braces() -> None:
     """Количество открывающих и закрывающих фигурных скобок совпадает."""
     result = render_caddyfile(
